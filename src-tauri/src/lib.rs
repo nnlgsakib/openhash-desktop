@@ -10,6 +10,51 @@ use futures_util::StreamExt; // For stream processing
 use tokio::io::AsyncWriteExt; // For async file writing
 use dirs;
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AppSettings {
+    db_path: Option<String>,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self { db_path: None }
+    }
+}
+
+fn get_settings_path() -> PathBuf {
+    let mut config_path = dirs::config_dir().unwrap_or_else(|| {
+        // Fallback for systems where config_dir is not available
+        std::env::current_dir().unwrap_or_default()
+    });
+    config_path.push("OpenHash");
+    fs::create_dir_all(&config_path).expect("Failed to create config directory");
+    config_path.push("settings.json");
+    config_path
+}
+
+fn load_settings() -> AppSettings {
+    let settings_path = get_settings_path();
+    if settings_path.exists() {
+        let content = fs::read_to_string(settings_path).unwrap_or_default();
+        serde_json::from_str(&content).unwrap_or_default()
+    } else {
+        AppSettings::default()
+    }
+}
+
+fn save_settings(settings: &AppSettings) {
+    let settings_path = get_settings_path();
+    let content = serde_json::to_string_pretty(settings).unwrap();
+    fs::write(settings_path, content).expect("Failed to write settings");
+}
+
+#[tauri::command]
+fn set_custom_data_path(path: String) {
+    let mut settings = load_settings();
+    settings.db_path = Some(path);
+    save_settings(&settings);
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NodeConfig {
     #[serde(rename = "dbPath")]
@@ -49,25 +94,42 @@ impl Default for AppState {
     }
 }
 
+// Get the default data directory for the application
+fn get_default_data_dir() -> PathBuf {
+    let mut default_path = dirs::data_dir().unwrap_or_else(|| {
+        // Fallback for systems where data_dir is not available
+        std::env::current_dir().unwrap_or_default().join("data")
+    });
+    default_path.push("OpenHash");
+    default_path
+}
+
 // Get the base data directory for the application
 fn get_data_dir(db_path: Option<String>) -> PathBuf {
     if let Some(path) = db_path.filter(|p| !p.is_empty()) {
+        return PathBuf::from(path);
+    }
+
+    let settings = load_settings();
+    if let Some(path) = settings.db_path.filter(|p| !p.is_empty()) {
         PathBuf::from(path)
     } else {
-        // Default to a subdirectory in the OS-specific data directory
-        let mut default_path = dirs::data_dir().unwrap_or_else(|| {
-            // Fallback for systems where data_dir is not available
-            std::env::current_dir().unwrap_or_default().join("data")
-        });
-        default_path.push("OpenHash");
-        default_path
+        get_default_data_dir()
     }
 }
 
-// Get the default data directory for the application
+// Get the current data directory for the application
 #[tauri::command]
-fn get_default_data_path() -> String {
-    get_data_dir(None).to_string_lossy().into_owned()
+fn get_current_data_path() -> String {
+    // First, check for a custom path in settings.
+    let settings = load_settings();
+    if let Some(path) = settings.db_path {
+        if !path.is_empty() {
+            return path;
+        }
+    }
+    // If no custom path is set, return the default path.
+    get_default_data_dir().to_string_lossy().into_owned()
 }
 
 // Add a log entry with timestamp
@@ -488,7 +550,8 @@ pub fn run() {
             check_and_download_update,
             get_logs,
             clear_logs,
-            get_default_data_path
+            get_current_data_path,
+            set_custom_data_path
         ])
         .setup(|_app| {
             #[cfg(debug_assertions)] // only enable for debug builds

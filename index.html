@@ -24,7 +24,10 @@
         
         <div class="form-group">
           <label for="db-path">Database Path:</label>
-          <input type="text" id="db-path" placeholder="data/data1/node1" />
+          <div id="db-path-container" class="path-container" title="Click to select a custom path">
+            <span id="db-path-text" class="path-text"></span>
+            <input type="hidden" id="db-path" />
+          </div>
         </div>
         
         <div class="form-group">

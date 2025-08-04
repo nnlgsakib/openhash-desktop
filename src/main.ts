@@ -1,8 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 
 // DOM elements
 let dbPathEl: HTMLInputElement | null;
+let dbPathTextEl: HTMLElement | null;
+let dbPathContainerEl: HTMLElement | null;
 let apiPortEl: HTMLInputElement | null;
 let p2pPortEl: HTMLInputElement | null;
 let startBtnEl: HTMLButtonElement | null;
@@ -15,8 +18,8 @@ let statusTextEl: HTMLElement | null;
 let logsOutputEl: HTMLElement | null;
 let logsSectionEl: HTMLElement | null;
 let infoMessageEl: HTMLElement | null;
-let progressBarEl: HTMLProgressElement | null; // New
-let progressTextEl: HTMLElement | null; // New
+let progressBarEl: HTMLProgressElement | null;
+let progressTextEl: HTMLElement | null;
 
 // Application state
 let isRunning = false;
@@ -27,12 +30,8 @@ let logUpdateInterval: number | null = null;
 // Initialize the application
 async function initApp() {
   try {
-    // Set default database path by invoking a command that provides it
-    // Note: You might need to implement `get_default_data_path` in your Rust backend.
-    const defaultDbPath = await invoke("get_default_data_path");
-    if (dbPathEl) {
-      dbPathEl.value = defaultDbPath as string;
-    }
+    // Set default database path
+    await updateDbPath();
 
     // Check if openhash.exe exists in the specified path
     const hasExecutable = await invoke("check_executable_exists", {
@@ -45,7 +44,7 @@ async function initApp() {
       updateInfoMessage("Ready to start OpenHash node.");
     }
     
-    // Listen for download events regardless of whether the executable exists initially
+    // Listen for download events
     await listen<DownloadProgress>("download_progress", (event) => {
       updateProgressBar(event.payload.current, event.payload.total);
     });
@@ -60,6 +59,40 @@ async function initApp() {
   } catch (error) {
     console.error("Failed to initialize app:", error);
     updateInfoMessage("Failed to initialize application.");
+  }
+}
+
+// Fetches and updates the database path from the backend
+async function updateDbPath() {
+  try {
+    const currentPath = await invoke("get_current_data_path");
+    if (dbPathEl && dbPathTextEl) {
+      dbPathEl.value = currentPath as string;
+      dbPathTextEl.textContent = currentPath as string;
+    }
+  } catch (error) {
+    console.error("Failed to get data path:", error);
+    updateInfoMessage("Failed to get data path.");
+  }
+}
+
+// Opens a dialog to select a new data path
+async function selectCustomPath() {
+  try {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: "Select a Data Directory",
+    });
+
+    if (typeof selected === 'string' && selected.trim() !== '') {
+      await invoke("set_custom_data_path", { path: selected });
+      await updateDbPath(); // Refresh the displayed path
+      updateInfoMessage(`Data path set to: ${selected}`);
+    }
+  } catch (error) {
+    console.error("Failed to select custom path:", error);
+    updateInfoMessage("Failed to set custom data path.");
   }
 }
 
@@ -130,29 +163,33 @@ function updateStatus(status: 'stopped' | 'running' | 'updating') {
 
 // Update button states
 function updateButtonStates() {
-  if (!startBtnEl || !stopBtnEl || !updateBtnEl) return;
+  if (!startBtnEl || !stopBtnEl || !updateBtnEl || !dbPathContainerEl) return;
   
+  const disableInputs = isRunning || isUpdating;
+
   if (isUpdating) {
-    startBtnEl.disabled = true;
-    stopBtnEl.disabled = true;
-    updateBtnEl.disabled = true;
     updateStatus('updating');
   } else if (isRunning) {
-    startBtnEl.disabled = true;
-    stopBtnEl.disabled = false;
-    updateBtnEl.disabled = true;
     updateStatus('running');
   } else {
-    startBtnEl.disabled = false;
-    stopBtnEl.disabled = true;
-    updateBtnEl.disabled = false;
     updateStatus('stopped');
   }
+
+  startBtnEl.disabled = disableInputs;
+  stopBtnEl.disabled = !isRunning || isUpdating;
+  updateBtnEl.disabled = disableInputs;
   
-  // Disable config inputs when running
-  if (dbPathEl) dbPathEl.disabled = isRunning;
-  if (apiPortEl) apiPortEl.disabled = isRunning;
-  if (p2pPortEl) p2pPortEl.disabled = isRunning;
+  // Disable config inputs and path selection when running or updating
+  if (apiPortEl) apiPortEl.disabled = disableInputs;
+  if (p2pPortEl) p2pPortEl.disabled = disableInputs;
+  
+  if (disableInputs) {
+    dbPathContainerEl.classList.add('disabled');
+    dbPathContainerEl.removeEventListener('click', selectCustomPath);
+  } else {
+    dbPathContainerEl.classList.remove('disabled');
+    dbPathContainerEl.addEventListener('click', selectCustomPath);
+  }
 }
 
 // Start the OpenHash node
@@ -166,7 +203,7 @@ async function startNode() {
   };
   
   if (!config.dbPath) {
-    updateInfoMessage("Please enter a database path.");
+    updateInfoMessage("Database path is not set.");
     return;
   }
   
@@ -189,7 +226,6 @@ async function startNode() {
       updateButtonStates();
       updateInfoMessage("OpenHash node started successfully.");
       
-      // Start monitoring logs if logs are visible
       if (logsVisible) {
         startLogMonitoring();
       }
@@ -212,8 +248,6 @@ async function stopNode() {
       isRunning = false;
       updateButtonStates();
       updateInfoMessage("OpenHash node stopped successfully.");
-      
-      // Stop log monitoring
       stopLogMonitoring();
     } else {
       updateInfoMessage("Failed to stop OpenHash node.");
@@ -237,11 +271,10 @@ async function checkForUpdates() {
       dbPath: dbPathEl.value.trim(),
     });
     
-    // Success message will be handled by the download_complete event listener
   } catch (error) {
     console.error("Failed to check for updates:", error);
     updateInfoMessage(`Update failed: ${error}`);
-    resetProgressBar(); // Hide progress bar on error
+    resetProgressBar();
   } finally {
     isUpdating = false;
     updateButtonStates();
@@ -267,9 +300,8 @@ function toggleLogs() {
 
 // Start log monitoring (periodic updates)
 function startLogMonitoring() {
-  if (logUpdateInterval) return; // Already monitoring
-  
-  logUpdateInterval = window.setInterval(updateLogs, 1000); // Update every second
+  if (logUpdateInterval) return;
+  logUpdateInterval = window.setInterval(updateLogs, 1000);
 }
 
 // Stop log monitoring
@@ -288,11 +320,8 @@ async function updateLogs() {
     const logs = await invoke("get_logs");
     const logsText = logs as string;
     
-    // Only update if content has changed
     if (logsOutputEl.textContent !== logsText) {
       logsOutputEl.textContent = logsText;
-      
-      // Auto-scroll to bottom
       const logsContainer = logsOutputEl.parentElement;
       if (logsContainer) {
         logsContainer.scrollTop = logsContainer.scrollHeight;
@@ -320,6 +349,8 @@ async function clearLogs() {
 window.addEventListener("DOMContentLoaded", () => {
   // Get DOM elements
   dbPathEl = document.querySelector("#db-path");
+  dbPathTextEl = document.querySelector("#db-path-text");
+  dbPathContainerEl = document.querySelector("#db-path-container");
   apiPortEl = document.querySelector("#api-port");
   p2pPortEl = document.querySelector("#p2p-port");
   startBtnEl = document.querySelector("#start-btn");
@@ -332,8 +363,8 @@ window.addEventListener("DOMContentLoaded", () => {
   logsOutputEl = document.querySelector("#logs-output");
   logsSectionEl = document.querySelector("#logs-section");
   infoMessageEl = document.querySelector("#info-message");
-  progressBarEl = document.querySelector("#download-progress-bar"); // New
-  progressTextEl = document.querySelector("#download-progress-text"); // New
+  progressBarEl = document.querySelector("#download-progress-bar");
+  progressTextEl = document.querySelector("#download-progress-text");
   
   // Add event listeners
   startBtnEl?.addEventListener("click", startNode);
@@ -341,8 +372,7 @@ window.addEventListener("DOMContentLoaded", () => {
   updateBtnEl?.addEventListener("click", checkForUpdates);
   logsBtnEl?.addEventListener("click", toggleLogs);
   closeLogsBtnEl?.addEventListener("click", toggleLogs);
-  
-  // Add double-click to clear logs
+  dbPathContainerEl?.addEventListener("click", selectCustomPath);
   logsOutputEl?.addEventListener("dblclick", clearLogs);
   
   // Initialize the application
@@ -350,6 +380,6 @@ window.addEventListener("DOMContentLoaded", () => {
   updateButtonStates();
   
   // Periodic status check
-  setInterval(updateProcessStatus, 5000); // Check every 5 seconds
+  setInterval(updateProcessStatus, 5000);
 });
 
