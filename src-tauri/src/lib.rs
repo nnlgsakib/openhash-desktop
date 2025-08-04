@@ -133,6 +133,14 @@ async fn start_node(config: NodeConfig, state: State<'_, AppState>) -> Result<bo
        .stdout(Stdio::piped())
        .stderr(Stdio::piped());
     
+    // Hide console window on Windows
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    
     // Start the process
     match cmd.spawn() {
         Ok(mut child) => {
