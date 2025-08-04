@@ -27,6 +27,12 @@ let logUpdateInterval: number | null = null;
 // Initialize the application
 async function initApp() {
   try {
+    // Set default database path
+    const defaultDbPath = await invoke("get_default_data_path");
+    if (dbPathEl) {
+      dbPathEl.value = defaultDbPath as string;
+    }
+
     // Check if openhash.exe exists, if not, prompt to download
     const hasExecutable = await invoke("check_executable_exists");
     if (!hasExecutable) {

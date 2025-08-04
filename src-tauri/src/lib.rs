@@ -1,12 +1,16 @@
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
+use std::fs;
 use std::io::{BufRead, BufReader};
 use std::thread;
 use serde::{Deserialize, Serialize};
-use tauri::{State, Emitter};
+use tauri::{State, Emitter}; // Added Emitter back
 use futures_util::StreamExt; // For stream processing
 use tokio::io::AsyncWriteExt; // For async file writing
+use tokio::fs::OpenOptions; // Added for OpenOptions
+use dirs;
+use reqwest::header; // Added for Range header
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NodeConfig {
@@ -52,12 +56,25 @@ fn get_executable_path(download_dir: Option<PathBuf>) -> PathBuf {
     let mut path = if let Some(dir) = download_dir {
         dir
     } else {
-        let mut p = std::env::current_exe().unwrap();
-        p.pop(); // Remove the executable name
-        p
+        dirs::data_dir().unwrap_or_else(|| {
+            let mut p = std::env::current_exe().unwrap();
+            p.pop(); // Remove the executable name
+            p
+        })
     };
     path.push("openhash.exe");
     path
+}
+
+// Get the default data directory for the application
+#[tauri::command]
+fn get_default_data_path() -> String {
+    if let Some(mut path) = dirs::data_dir() {
+        path.push("OpenHash"); // Subdirectory for your app
+        path.to_string_lossy().into_owned()
+    } else {
+        "data/data1/node1".to_string() // Fallback if data_dir is not found
+    }
 }
 
 // Add a log entry with timestamp
@@ -96,6 +113,22 @@ async fn start_node(config: NodeConfig, state: State<'_, AppState>) -> Result<bo
         return Err("OpenHash executable not found. Please download it first.".to_string());
     }
     
+    // If db_path is empty, use the default data directory
+    let final_db_path = if config.db_path.is_empty() {
+        let mut default_path = dirs::data_dir().unwrap_or_else(|| {
+            let mut p = std::env::current_exe().unwrap();
+            p.pop();
+            p
+        });
+        default_path.push("OpenHash");
+        default_path.push("data1"); // Example subdirectory
+        default_path.push("node1"); // Example subdirectory
+        fs::create_dir_all(&default_path).map_err(|e| format!("Failed to create default DB directory: {}", e))?;
+        default_path.to_string_lossy().into_owned()
+    } else {
+        config.db_path.clone() // Clone to avoid partial move
+    };
+    
     // Check if a process is already running
     {
         let is_running = state.is_running.lock().unwrap();
@@ -110,7 +143,7 @@ async fn start_node(config: NodeConfig, state: State<'_, AppState>) -> Result<bo
        .arg("--api-port")
        .arg(config.api_port.to_string())
        .arg("--db")
-       .arg(&config.db_path)
+       .arg(&final_db_path)
        .arg("--p2p-port")
        .arg(config.p2p_port.to_string())
        .stdout(Stdio::piped())
@@ -130,7 +163,7 @@ async fn start_node(config: NodeConfig, state: State<'_, AppState>) -> Result<bo
                 let mut logs_guard = state.logs.lock().unwrap();
                 logs_guard.clear();
             }
-            add_log_entry(&state.logs, &format!("Starting OpenHash node with config: {:?}", config));
+            add_log_entry(&state.logs, &format!("Starting OpenHash node with config: {:?}, DB Path: {}", &config, final_db_path));
             
             // Capture stdout
             if let Some(stdout) = child.stdout.take() {
@@ -271,11 +304,60 @@ async fn check_and_download_update(app_handle: tauri::AppHandle, state: State<'_
             error_msg
         })?;
     
-    add_log_entry(&state.logs, "Downloading openhash.exe...");
+    // Determine the executable path (default to app data directory)
+    let executable_path = get_executable_path(None);
+    let mut downloaded_bytes: u64 = 0;
+
+    // Get total size from HEAD request first
+    let head_response = client
+        .head(&asset.browser_download_url)
+        .send()
+        .await
+        .map_err(|e| {
+            let error_msg = format!("Failed to get file size: {}", e);
+            add_log_entry(&state.logs, &error_msg);
+            error_msg
+        })?;
+    let total_size = head_response.content_length().unwrap_or(0);
+
+    // Check if a partial file exists and get its size for resuming
+    if executable_path.exists() {
+        match fs::metadata(&executable_path) {
+            Ok(metadata) => {
+                downloaded_bytes = metadata.len();
+                if downloaded_bytes == total_size {
+                    add_log_entry(&state.logs, "openhash.exe is already up to date.");
+                    app_handle.emit("download_complete", ()).map_err(|e| {
+                        let error_msg = format!("Failed to emit download_complete event: {}", e);
+                        add_log_entry(&state.logs, &error_msg);
+                        error_msg
+                    })?;
+                    return Ok(true);
+                } else if downloaded_bytes < total_size {
+                    add_log_entry(&state.logs, &format!("Resuming download from {} bytes.", downloaded_bytes));
+                } else { // downloaded_bytes > total_size, likely a corrupted or newer file
+                    add_log_entry(&state.logs, "Existing file is larger than expected, restarting download.");
+                    fs::remove_file(&executable_path).map_err(|e| format!("Failed to remove corrupted file: {}", e))?;
+                    downloaded_bytes = 0;
+                }
+            },
+            Err(e) => {
+                let error_msg = format!("Failed to get metadata for existing file: {}", e);
+                add_log_entry(&state.logs, &error_msg);
+                return Err(error_msg);
+            }
+        }
+    }
+
+    add_log_entry(&state.logs, &format!("Downloading openhash.exe to {:?}...", executable_path));
     
-    // Download the executable with progress
-    let mut download_response = client
-        .get(&asset.browser_download_url)
+    // Download the executable with progress and resumability
+    let mut request_builder = client.get(&asset.browser_download_url);
+    if downloaded_bytes > 0 {
+        request_builder = request_builder.header(reqwest::header::RANGE, format!("bytes={}-", downloaded_bytes));
+    }
+
+    let download_response = request_builder
         .send()
         .await
         .map_err(|e| {
@@ -284,20 +366,19 @@ async fn check_and_download_update(app_handle: tauri::AppHandle, state: State<'_
             error_msg
         })?;
     
-    if !download_response.status().is_success() {
-        let error_msg = "Failed to download executable".to_string();
+    if !download_response.status().is_success() && download_response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+        let error_msg = format!("Failed to download executable: Status {}", download_response.status());
         add_log_entry(&state.logs, &error_msg);
         return Err(error_msg);
     }
 
-    let total_size = download_response.content_length().unwrap_or(0);
-    let mut downloaded: u64 = 0;
-
-    let executable_path = get_executable_path(None);
-    let mut file = tokio::fs::File::create(&executable_path)
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true) // Append to existing file for resumability
+        .open(&executable_path)
         .await
         .map_err(|e| {
-            let error_msg = format!("Failed to create file: {}", e);
+            let error_msg = format!("Failed to open file for writing: {}", e);
             add_log_entry(&state.logs, &error_msg);
             error_msg
         })?;
@@ -317,11 +398,11 @@ async fn check_and_download_update(app_handle: tauri::AppHandle, state: State<'_
                 add_log_entry(&state.logs, &error_msg);
                 error_msg
             })?;
-        downloaded += chunk.len() as u64;
+        downloaded_bytes += chunk.len() as u64;
 
         // Emit progress event
         app_handle.emit("download_progress", DownloadProgress {
-            current: downloaded,
+            current: downloaded_bytes,
             total: total_size,
         }).map_err(|e| {
             let error_msg = format!("Failed to emit download_progress event: {}", e);
@@ -398,11 +479,12 @@ pub fn run() {
             get_process_status,
             start_node,
             stop_node,
-            check_and_download_update,
+            check_and_download_update, // Re-typed
             get_logs,
-            clear_logs
+            clear_logs,
+            get_default_data_path
         ])
-        .setup(|app| {
+        .setup(|_app| {
             #[cfg(debug_assertions)] // only enable for debug builds
             {
                 let window = app.get_window("main").unwrap();
