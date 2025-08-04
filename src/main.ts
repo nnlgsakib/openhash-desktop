@@ -27,30 +27,34 @@ let logUpdateInterval: number | null = null;
 // Initialize the application
 async function initApp() {
   try {
-    // Set default database path
+    // Set default database path by invoking a command that provides it
+    // Note: You might need to implement `get_default_data_path` in your Rust backend.
     const defaultDbPath = await invoke("get_default_data_path");
     if (dbPathEl) {
       dbPathEl.value = defaultDbPath as string;
     }
 
-    // Check if openhash.exe exists, if not, prompt to download
-    const hasExecutable = await invoke("check_executable_exists");
+    // Check if openhash.exe exists in the specified path
+    const hasExecutable = await invoke("check_executable_exists", {
+      dbPath: dbPathEl?.value,
+    });
+
     if (!hasExecutable) {
       updateInfoMessage("OpenHash executable not found. Click 'Check for Updates' to download the latest version.");
-      // Listen for download progress events
-      await listen<DownloadProgress>("download_progress", (event) => {
-        updateProgressBar(event.payload.current, event.payload.total);
-      });
-      // Listen for download complete event
-      await listen("download_complete", () => {
-        resetProgressBar();
-        updateInfoMessage("Download completed successfully. Ready to start OpenHash node.");
-        updateProcessStatus(); // Re-check status after download
-      });
     } else {
       updateInfoMessage("Ready to start OpenHash node.");
     }
     
+    // Listen for download events regardless of whether the executable exists initially
+    await listen<DownloadProgress>("download_progress", (event) => {
+      updateProgressBar(event.payload.current, event.payload.total);
+    });
+    await listen("download_complete", () => {
+      resetProgressBar();
+      updateInfoMessage("Download completed successfully. Ready to start OpenHash node.");
+      updateProcessStatus(); // Re-check status after download
+    });
+
     // Check process status
     await updateProcessStatus();
   } catch (error) {
@@ -222,12 +226,16 @@ async function stopNode() {
 
 // Check for updates and download if available
 async function checkForUpdates() {
+  if (!dbPathEl) return;
+
   try {
     isUpdating = true;
     updateButtonStates();
     updateInfoMessage("Checking for updates and downloading openhash.exe...");
     
-    await invoke("check_and_download_update");
+    await invoke("check_and_download_update", {
+      dbPath: dbPathEl.value.trim(),
+    });
     
     // Success message will be handled by the download_complete event listener
   } catch (error) {

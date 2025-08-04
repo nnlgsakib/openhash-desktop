@@ -5,12 +5,10 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::thread;
 use serde::{Deserialize, Serialize};
-use tauri::{State, Emitter}; // Added Emitter back
+use tauri::{State, Emitter};
 use futures_util::StreamExt; // For stream processing
 use tokio::io::AsyncWriteExt; // For async file writing
-use tokio::fs::OpenOptions; // Added for OpenOptions
 use dirs;
-use reqwest::header; // Added for Range header
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NodeConfig {
@@ -51,30 +49,25 @@ impl Default for AppState {
     }
 }
 
-// Get the path to the openhash executable
-fn get_executable_path(download_dir: Option<PathBuf>) -> PathBuf {
-    let mut path = if let Some(dir) = download_dir {
-        dir
+// Get the base data directory for the application
+fn get_data_dir(db_path: Option<String>) -> PathBuf {
+    if let Some(path) = db_path.filter(|p| !p.is_empty()) {
+        PathBuf::from(path)
     } else {
-        dirs::data_dir().unwrap_or_else(|| {
-            let mut p = std::env::current_exe().unwrap();
-            p.pop(); // Remove the executable name
-            p
-        })
-    };
-    path.push("openhash.exe");
-    path
+        // Default to a subdirectory in the OS-specific data directory
+        let mut default_path = dirs::data_dir().unwrap_or_else(|| {
+            // Fallback for systems where data_dir is not available
+            std::env::current_dir().unwrap_or_default().join("data")
+        });
+        default_path.push("OpenHash");
+        default_path
+    }
 }
 
 // Get the default data directory for the application
 #[tauri::command]
 fn get_default_data_path() -> String {
-    if let Some(mut path) = dirs::data_dir() {
-        path.push("OpenHash"); // Subdirectory for your app
-        path.to_string_lossy().into_owned()
-    } else {
-        "data/data1/node1".to_string() // Fallback if data_dir is not found
-    }
+    get_data_dir(None).to_string_lossy().into_owned()
 }
 
 // Add a log entry with timestamp
@@ -93,8 +86,10 @@ fn add_log_entry(logs: &Arc<Mutex<String>>, message: &str) {
 
 // Check if the openhash executable exists
 #[tauri::command]
-fn check_executable_exists() -> bool {
-    get_executable_path(None).exists()
+fn check_executable_exists(db_path: Option<String>) -> bool {
+    let data_dir = get_data_dir(db_path);
+    let executable_path = data_dir.join("openhash.exe");
+    executable_path.exists()
 }
 
 // Get the current process status
@@ -107,27 +102,16 @@ async fn get_process_status(state: State<'_, AppState>) -> Result<bool, String> 
 // Start the OpenHash node
 #[tauri::command]
 async fn start_node(config: NodeConfig, state: State<'_, AppState>) -> Result<bool, String> {
-    let executable_path = get_executable_path(None);
+    let data_dir = get_data_dir(Some(config.db_path.clone()));
+    let executable_path = data_dir.join("openhash.exe");
     
     if !executable_path.exists() {
         return Err("OpenHash executable not found. Please download it first.".to_string());
     }
     
-    // If db_path is empty, use the default data directory
-    let final_db_path = if config.db_path.is_empty() {
-        let mut default_path = dirs::data_dir().unwrap_or_else(|| {
-            let mut p = std::env::current_exe().unwrap();
-            p.pop();
-            p
-        });
-        default_path.push("OpenHash");
-        default_path.push("data1"); // Example subdirectory
-        default_path.push("node1"); // Example subdirectory
-        fs::create_dir_all(&default_path).map_err(|e| format!("Failed to create default DB directory: {}", e))?;
-        default_path.to_string_lossy().into_owned()
-    } else {
-        config.db_path.clone() // Clone to avoid partial move
-    };
+    // The --db argument for the daemon should point to a specific subdirectory
+    let final_db_path = data_dir.join("node1");
+    fs::create_dir_all(&final_db_path).map_err(|e| format!("Failed to create DB directory: {}", e))?;
     
     // Check if a process is already running
     {
@@ -163,7 +147,7 @@ async fn start_node(config: NodeConfig, state: State<'_, AppState>) -> Result<bo
                 let mut logs_guard = state.logs.lock().unwrap();
                 logs_guard.clear();
             }
-            add_log_entry(&state.logs, &format!("Starting OpenHash node with config: {:?}, DB Path: {}", &config, final_db_path));
+            add_log_entry(&state.logs, &format!("Starting OpenHash node with config: {:?}, DB Path: {:?}", &config, final_db_path));
             
             // Capture stdout
             if let Some(stdout) = child.stdout.take() {
@@ -258,7 +242,11 @@ async fn stop_node(state: State<'_, AppState>) -> Result<bool, String> {
 
 // Check for updates and download if available
 #[tauri::command]
-async fn check_and_download_update(app_handle: tauri::AppHandle, state: State<'_, AppState>) -> Result<bool, String> {
+async fn check_and_download_update(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+    db_path: Option<String>,
+) -> Result<bool, String> {
     const GITHUB_API_URL: &str = "https://api.github.com/repos/nnlgsakib/open-hash-db/releases/latest";
     
     add_log_entry(&state.logs, "Checking for updates...");
@@ -304,8 +292,10 @@ async fn check_and_download_update(app_handle: tauri::AppHandle, state: State<'_
             error_msg
         })?;
     
-    // Determine the executable path (default to app data directory)
-    let executable_path = get_executable_path(None);
+    // Determine the executable path
+    let data_dir = get_data_dir(db_path);
+    fs::create_dir_all(&data_dir).map_err(|e| format!("Failed to create data directory: {}", e))?;
+    let executable_path = data_dir.join("openhash.exe");
     let mut downloaded_bytes: u64 = 0;
 
     // Get total size from HEAD request first
@@ -318,14 +308,14 @@ async fn check_and_download_update(app_handle: tauri::AppHandle, state: State<'_
             add_log_entry(&state.logs, &error_msg);
             error_msg
         })?;
-    let total_size = head_response.content_length().unwrap_or(0);
+    let mut total_size = head_response.content_length().unwrap_or(0);
 
     // Check if a partial file exists and get its size for resuming
     if executable_path.exists() {
         match fs::metadata(&executable_path) {
             Ok(metadata) => {
                 downloaded_bytes = metadata.len();
-                if downloaded_bytes == total_size {
+                if total_size > 0 && downloaded_bytes == total_size {
                     add_log_entry(&state.logs, "openhash.exe is already up to date.");
                     app_handle.emit("download_complete", ()).map_err(|e| {
                         let error_msg = format!("Failed to emit download_complete event: {}", e);
@@ -333,11 +323,11 @@ async fn check_and_download_update(app_handle: tauri::AppHandle, state: State<'_
                         error_msg
                     })?;
                     return Ok(true);
-                } else if downloaded_bytes < total_size {
+                } else if total_size > 0 && downloaded_bytes < total_size {
                     add_log_entry(&state.logs, &format!("Resuming download from {} bytes.", downloaded_bytes));
-                } else { // downloaded_bytes > total_size, likely a corrupted or newer file
-                    add_log_entry(&state.logs, "Existing file is larger than expected, restarting download.");
-                    fs::remove_file(&executable_path).map_err(|e| format!("Failed to remove corrupted file: {}", e))?;
+                } else if downloaded_bytes > 0 {
+                    add_log_entry(&state.logs, "Could not verify file size. Restarting download.");
+                    fs::remove_file(&executable_path).map_err(|e| format!("Failed to remove existing file: {}", e))?;
                     downloaded_bytes = 0;
                 }
             },
@@ -372,9 +362,15 @@ async fn check_and_download_update(app_handle: tauri::AppHandle, state: State<'_
         return Err(error_msg);
     }
 
+    // Update total_size from the actual download response if not already set
+    if total_size == 0 {
+        total_size = download_response.content_length().unwrap_or(0) + downloaded_bytes;
+    }
+
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)
-        .append(true) // Append to existing file for resumability
+        .append(downloaded_bytes > 0) // Only append if resuming
+        .write(true)
         .open(&executable_path)
         .await
         .map_err(|e| {
@@ -401,6 +397,7 @@ async fn check_and_download_update(app_handle: tauri::AppHandle, state: State<'_
         downloaded_bytes += chunk.len() as u64;
 
         // Emit progress event
+        add_log_entry(&state.logs, &format!("Emitting download_progress: {}/{}", downloaded_bytes, total_size));
         app_handle.emit("download_progress", DownloadProgress {
             current: downloaded_bytes,
             total: total_size,
@@ -409,6 +406,7 @@ async fn check_and_download_update(app_handle: tauri::AppHandle, state: State<'_
             add_log_entry(&state.logs, &error_msg);
             error_msg
         })?;
+        add_log_entry(&state.logs, "Emitted download_progress");
     }
     
     // Make it executable on Unix systems
@@ -479,7 +477,7 @@ pub fn run() {
             get_process_status,
             start_node,
             stop_node,
-            check_and_download_update, // Re-typed
+            check_and_download_update,
             get_logs,
             clear_logs,
             get_default_data_path
@@ -487,7 +485,7 @@ pub fn run() {
         .setup(|_app| {
             #[cfg(debug_assertions)] // only enable for debug builds
             {
-                let window = app.get_window("main").unwrap();
+                let window = _app.get_webview_window("main").unwrap();
                 window.open_devtools();
                 window.close_devtools();
             }
