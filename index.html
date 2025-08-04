@@ -46,6 +46,7 @@
         <button id="stop-btn" class="btn btn-secondary" disabled>Stop Node</button>
         <button id="update-btn" class="btn btn-accent">Check for Updates</button>
         <button id="logs-btn" class="btn btn-info">View Logs</button>
+        <button id="open-webview-btn" class="btn btn-info">Open Webview</button>
       </div>
 
       <div class="logs-section" id="logs-section" style="display: none;">
@@ -69,6 +70,11 @@
         <span id="download-progress-text"></span>
       </div>
     </main>
+
+    <div id="webview-container" style="display: none;">
+      <button id="back-btn" class="btn btn-secondary">Back</button>
+      <iframe id="webview-iframe"></iframe>
+    </div>
   </body>
 </html>
 

@@ -5,7 +5,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::thread;
 use serde::{Deserialize, Serialize};
-use tauri::{State, Emitter};
+use tauri::{Emitter, Manager, State, WebviewWindowBuilder};
 use futures_util::StreamExt; // For stream processing
 use tokio::io::AsyncWriteExt; // For async file writing
 use dirs;
@@ -529,6 +529,32 @@ async fn clear_logs(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn open_webview(app_handle: tauri::AppHandle, port: u16) -> Result<(), String> {
+    let url = format!("http://localhost:{}", port);
+
+    // Check if a window with this label already exists
+    if app_handle.get_webview_window(&format!("webview_{}", port)).is_some() {
+        return Err(format!("Webview for port {} is already open.", port));
+    }
+
+    // Create a new window
+    let webview_window = WebviewWindowBuilder::new(
+        &app_handle,
+        format!("webview_{}", port), // Unique label
+        tauri::WebviewUrl::External(url.parse().unwrap()),
+    )
+    .title(format!("Webview - Port {}", port))
+    .inner_size(800.0, 600.0)
+    .build()
+    .map_err(|e| format!("Failed to create webview window: {}", e))?;
+
+    webview_window.set_focus().map_err(|e| format!("Failed to focus webview window: {}", e))?;
+
+    Ok(())
+}
+
+
 // Legacy greet command (keeping for compatibility)
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -556,6 +582,8 @@ pub fn run() {
         .setup(|_app| {
             #[cfg(debug_assertions)] // only enable for debug builds
             {
+                use tauri::Manager;
+
                 let window = _app.get_webview_window("main").unwrap();
                 window.open_devtools();
                 window.close_devtools();

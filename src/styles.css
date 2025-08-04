@@ -193,3 +193,27 @@ pre {
 progress {
   width: 100%;
 }
+
+/* Webview Styles */
+#webview-container {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--background-color);
+}
+
+#webview-iframe {
+  flex-grow: 1;
+  border: none;
+}
+
+#back-btn {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  z-index: 1000;
+}

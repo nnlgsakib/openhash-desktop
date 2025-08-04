@@ -12,6 +12,7 @@ let startBtnEl: HTMLButtonElement | null;
 let stopBtnEl: HTMLButtonElement | null;
 let updateBtnEl: HTMLButtonElement | null;
 let logsBtnEl: HTMLButtonElement | null;
+let openWebviewBtnEl: HTMLButtonElement | null;
 let closeLogsBtnEl: HTMLButtonElement | null;
 let statusDotEl: HTMLElement | null;
 let statusTextEl: HTMLElement | null;
@@ -20,6 +21,10 @@ let logsSectionEl: HTMLElement | null;
 let infoMessageEl: HTMLElement | null;
 let progressBarEl: HTMLProgressElement | null;
 let progressTextEl: HTMLElement | null;
+let mainContainerEl: HTMLElement | null;
+let webviewContainerEl: HTMLElement | null;
+let webviewIframeEl: HTMLIFrameElement | null;
+let backBtnEl: HTMLButtonElement | null;
 
 // Application state
 let isRunning = false;
@@ -163,7 +168,7 @@ function updateStatus(status: 'stopped' | 'running' | 'updating') {
 
 // Update button states
 function updateButtonStates() {
-  if (!startBtnEl || !stopBtnEl || !updateBtnEl || !dbPathContainerEl) return;
+  if (!startBtnEl || !stopBtnEl || !updateBtnEl || !dbPathContainerEl || !openWebviewBtnEl) return;
   
   const disableInputs = isRunning || isUpdating;
 
@@ -178,6 +183,7 @@ function updateButtonStates() {
   startBtnEl.disabled = disableInputs;
   stopBtnEl.disabled = !isRunning || isUpdating;
   updateBtnEl.disabled = disableInputs;
+  openWebviewBtnEl.disabled = !isRunning || isUpdating;
   
   // Disable config inputs and path selection when running or updating
   if (apiPortEl) apiPortEl.disabled = disableInputs;
@@ -345,6 +351,32 @@ async function clearLogs() {
   }
 }
 
+// Open webview
+async function openWebview() {
+  if (!apiPortEl || !mainContainerEl || !webviewContainerEl || !webviewIframeEl) return;
+
+  const apiPort = parseInt(apiPortEl.value);
+  if (isNaN(apiPort) || apiPort < 1 || apiPort > 65535) {
+    updateInfoMessage("Please enter a valid API port (1-65535).");
+    return;
+  }
+
+  const url = `http://localhost:${apiPort}`;
+  webviewIframeEl.src = url;
+
+  mainContainerEl.style.display = "none";
+  webviewContainerEl.style.display = "flex";
+}
+
+// Close webview
+function closeWebview() {
+  if (!mainContainerEl || !webviewContainerEl || !webviewIframeEl) return;
+
+  webviewIframeEl.src = "about:blank";
+  mainContainerEl.style.display = "block";
+  webviewContainerEl.style.display = "none";
+}
+
 // Event listeners
 window.addEventListener("DOMContentLoaded", () => {
   // Get DOM elements
@@ -357,6 +389,7 @@ window.addEventListener("DOMContentLoaded", () => {
   stopBtnEl = document.querySelector("#stop-btn");
   updateBtnEl = document.querySelector("#update-btn");
   logsBtnEl = document.querySelector("#logs-btn");
+  openWebviewBtnEl = document.querySelector("#open-webview-btn");
   closeLogsBtnEl = document.querySelector("#close-logs-btn");
   statusDotEl = document.querySelector("#status-dot");
   statusTextEl = document.querySelector("#status-text");
@@ -365,12 +398,18 @@ window.addEventListener("DOMContentLoaded", () => {
   infoMessageEl = document.querySelector("#info-message");
   progressBarEl = document.querySelector("#download-progress-bar");
   progressTextEl = document.querySelector("#download-progress-text");
+  mainContainerEl = document.querySelector(".container");
+  webviewContainerEl = document.querySelector("#webview-container");
+  webviewIframeEl = document.querySelector("#webview-iframe");
+  backBtnEl = document.querySelector("#back-btn");
   
   // Add event listeners
   startBtnEl?.addEventListener("click", startNode);
   stopBtnEl?.addEventListener("click", stopNode);
   updateBtnEl?.addEventListener("click", checkForUpdates);
   logsBtnEl?.addEventListener("click", toggleLogs);
+  openWebviewBtnEl?.addEventListener("click", openWebview);
+  backBtnEl?.addEventListener("click", closeWebview);
   closeLogsBtnEl?.addEventListener("click", toggleLogs);
   dbPathContainerEl?.addEventListener("click", selectCustomPath);
   logsOutputEl?.addEventListener("dblclick", clearLogs);
