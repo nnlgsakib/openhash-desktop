@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 // DOM elements
 let dbPathEl: HTMLInputElement | null;
@@ -14,6 +15,8 @@ let statusTextEl: HTMLElement | null;
 let logsOutputEl: HTMLElement | null;
 let logsSectionEl: HTMLElement | null;
 let infoMessageEl: HTMLElement | null;
+let progressBarEl: HTMLProgressElement | null; // New
+let progressTextEl: HTMLElement | null; // New
 
 // Application state
 let isRunning = false;
@@ -28,6 +31,16 @@ async function initApp() {
     const hasExecutable = await invoke("check_executable_exists");
     if (!hasExecutable) {
       updateInfoMessage("OpenHash executable not found. Click 'Check for Updates' to download the latest version.");
+      // Listen for download progress events
+      await listen<DownloadProgress>("download_progress", (event) => {
+        updateProgressBar(event.payload.current, event.payload.total);
+      });
+      // Listen for download complete event
+      await listen("download_complete", () => {
+        resetProgressBar();
+        updateInfoMessage("Download completed successfully. Ready to start OpenHash node.");
+        updateProcessStatus(); // Re-check status after download
+      });
     } else {
       updateInfoMessage("Ready to start OpenHash node.");
     }
@@ -38,6 +51,31 @@ async function initApp() {
     console.error("Failed to initialize app:", error);
     updateInfoMessage("Failed to initialize application.");
   }
+}
+
+interface DownloadProgress {
+  current: number;
+  total: number;
+}
+
+// Update progress bar
+function updateProgressBar(current: number, total: number) {
+  if (!progressBarEl || !progressTextEl) return;
+
+  progressBarEl.style.display = 'block';
+  progressBarEl.max = total;
+  progressBarEl.value = current;
+
+  const percentage = total > 0 ? Math.round((current / total) * 100) : 0;
+  progressTextEl.textContent = `Downloading: ${percentage}%`;
+}
+
+// Reset and hide progress bar
+function resetProgressBar() {
+  if (!progressBarEl || !progressTextEl) return;
+  progressBarEl.style.display = 'none';
+  progressBarEl.value = 0;
+  progressTextEl.textContent = '';
 }
 
 // Update process status from backend
@@ -181,18 +219,15 @@ async function checkForUpdates() {
   try {
     isUpdating = true;
     updateButtonStates();
-    updateInfoMessage("Checking for updates...");
+    updateInfoMessage("Checking for updates and downloading openhash.exe...");
     
-    const result = await invoke("check_and_download_update");
+    await invoke("check_and_download_update");
     
-    if (result) {
-      updateInfoMessage("Update completed successfully.");
-    } else {
-      updateInfoMessage("No updates available or update failed.");
-    }
+    // Success message will be handled by the download_complete event listener
   } catch (error) {
     console.error("Failed to check for updates:", error);
     updateInfoMessage(`Update failed: ${error}`);
+    resetProgressBar(); // Hide progress bar on error
   } finally {
     isUpdating = false;
     updateButtonStates();
@@ -283,6 +318,8 @@ window.addEventListener("DOMContentLoaded", () => {
   logsOutputEl = document.querySelector("#logs-output");
   logsSectionEl = document.querySelector("#logs-section");
   infoMessageEl = document.querySelector("#info-message");
+  progressBarEl = document.querySelector("#download-progress-bar"); // New
+  progressTextEl = document.querySelector("#download-progress-text"); // New
   
   // Add event listeners
   startBtnEl?.addEventListener("click", startNode);

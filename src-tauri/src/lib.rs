@@ -1,11 +1,12 @@
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
-use std::fs;
 use std::io::{BufRead, BufReader};
 use std::thread;
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{State, Emitter};
+use futures_util::StreamExt; // For stream processing
+use tokio::io::AsyncWriteExt; // For async file writing
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NodeConfig {
@@ -47,9 +48,14 @@ impl Default for AppState {
 }
 
 // Get the path to the openhash executable
-fn get_executable_path() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // Remove the executable name
+fn get_executable_path(download_dir: Option<PathBuf>) -> PathBuf {
+    let mut path = if let Some(dir) = download_dir {
+        dir
+    } else {
+        let mut p = std::env::current_exe().unwrap();
+        p.pop(); // Remove the executable name
+        p
+    };
     path.push("openhash.exe");
     path
 }
@@ -71,7 +77,7 @@ fn add_log_entry(logs: &Arc<Mutex<String>>, message: &str) {
 // Check if the openhash executable exists
 #[tauri::command]
 fn check_executable_exists() -> bool {
-    get_executable_path().exists()
+    get_executable_path(None).exists()
 }
 
 // Get the current process status
@@ -84,7 +90,7 @@ async fn get_process_status(state: State<'_, AppState>) -> Result<bool, String> 
 // Start the OpenHash node
 #[tauri::command]
 async fn start_node(config: NodeConfig, state: State<'_, AppState>) -> Result<bool, String> {
-    let executable_path = get_executable_path();
+    let executable_path = get_executable_path(None);
     
     if !executable_path.exists() {
         return Err("OpenHash executable not found. Please download it first.".to_string());
@@ -219,7 +225,7 @@ async fn stop_node(state: State<'_, AppState>) -> Result<bool, String> {
 
 // Check for updates and download if available
 #[tauri::command]
-async fn check_and_download_update(state: State<'_, AppState>) -> Result<bool, String> {
+async fn check_and_download_update(app_handle: tauri::AppHandle, state: State<'_, AppState>) -> Result<bool, String> {
     const GITHUB_API_URL: &str = "https://api.github.com/repos/nnlgsakib/open-hash-db/releases/latest";
     
     add_log_entry(&state.logs, "Checking for updates...");
@@ -267,8 +273,8 @@ async fn check_and_download_update(state: State<'_, AppState>) -> Result<bool, S
     
     add_log_entry(&state.logs, "Downloading openhash.exe...");
     
-    // Download the executable
-    let download_response = client
+    // Download the executable with progress
+    let mut download_response = client
         .get(&asset.browser_download_url)
         .send()
         .await
@@ -283,24 +289,46 @@ async fn check_and_download_update(state: State<'_, AppState>) -> Result<bool, S
         add_log_entry(&state.logs, &error_msg);
         return Err(error_msg);
     }
-    
-    let executable_bytes = download_response
-        .bytes()
+
+    let total_size = download_response.content_length().unwrap_or(0);
+    let mut downloaded: u64 = 0;
+
+    let executable_path = get_executable_path(None);
+    let mut file = tokio::fs::File::create(&executable_path)
         .await
         .map_err(|e| {
-            let error_msg = format!("Failed to read executable bytes: {}", e);
+            let error_msg = format!("Failed to create file: {}", e);
             add_log_entry(&state.logs, &error_msg);
             error_msg
         })?;
-    
-    // Save the executable
-    let executable_path = get_executable_path();
-    fs::write(&executable_path, executable_bytes)
-        .map_err(|e| {
-            let error_msg = format!("Failed to save executable: {}", e);
+
+    let mut stream = download_response.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| {
+            let error_msg = format!("Error while downloading chunk: {}", e);
             add_log_entry(&state.logs, &error_msg);
             error_msg
         })?;
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| {
+                let error_msg = format!("Error while writing to file: {}", e);
+                add_log_entry(&state.logs, &error_msg);
+                error_msg
+            })?;
+        downloaded += chunk.len() as u64;
+
+        // Emit progress event
+        app_handle.emit("download_progress", DownloadProgress {
+            current: downloaded,
+            total: total_size,
+        }).map_err(|e| {
+            let error_msg = format!("Failed to emit download_progress event: {}", e);
+            add_log_entry(&state.logs, &error_msg);
+            error_msg
+        })?;
+    }
     
     // Make it executable on Unix systems
     #[cfg(unix)]
@@ -323,7 +351,18 @@ async fn check_and_download_update(state: State<'_, AppState>) -> Result<bool, S
     }
     
     add_log_entry(&state.logs, "Download completed successfully");
+    app_handle.emit("download_complete", ()).map_err(|e| {
+        let error_msg = format!("Failed to emit download_complete event: {}", e);
+        add_log_entry(&state.logs, &error_msg);
+        error_msg
+    })?;
     Ok(true)
+}
+
+#[derive(Clone, serde::Serialize)]
+struct DownloadProgress {
+    current: u64,
+    total: u64,
 }
 
 // Get logs from the running process
@@ -351,6 +390,7 @@ fn greet(name: &str) -> String {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             greet,
@@ -362,6 +402,15 @@ pub fn run() {
             get_logs,
             clear_logs
         ])
+        .setup(|app| {
+            #[cfg(debug_assertions)] // only enable for debug builds
+            {
+                let window = app.get_window("main").unwrap();
+                window.open_devtools();
+                window.close_devtools();
+            }
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
