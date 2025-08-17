@@ -21,10 +21,6 @@ let logsSectionEl: HTMLElement | null;
 let infoMessageEl: HTMLElement | null;
 let progressBarEl: HTMLProgressElement | null;
 let progressTextEl: HTMLElement | null;
-let mainContainerEl: HTMLElement | null;
-let webviewContainerEl: HTMLElement | null;
-let webviewIframeEl: HTMLIFrameElement | null;
-let backBtnEl: HTMLButtonElement | null;
 
 // Application state
 let isRunning = false;
@@ -353,7 +349,7 @@ async function clearLogs() {
 
 // Open webview
 async function openWebview() {
-  if (!apiPortEl || !mainContainerEl || !webviewContainerEl || !webviewIframeEl) return;
+  if (!apiPortEl) return;
 
   const apiPort = parseInt(apiPortEl.value);
   if (isNaN(apiPort) || apiPort < 1 || apiPort > 65535) {
@@ -361,20 +357,12 @@ async function openWebview() {
     return;
   }
 
-  const url = `http://localhost:${apiPort}`;
-  webviewIframeEl.src = url;
-
-  mainContainerEl.style.display = "none";
-  webviewContainerEl.style.display = "flex";
-}
-
-// Close webview
-function closeWebview() {
-  if (!mainContainerEl || !webviewContainerEl || !webviewIframeEl) return;
-
-  webviewIframeEl.src = "about:blank";
-  mainContainerEl.style.display = "block";
-  webviewContainerEl.style.display = "none";
+  try {
+    await invoke("open_webview", { port: apiPort });
+  } catch (error) {
+    console.error("Failed to open webview:", error);
+    updateInfoMessage(`Failed to open webview: ${error}`);
+  }
 }
 
 // Event listeners
@@ -398,10 +386,6 @@ window.addEventListener("DOMContentLoaded", () => {
   infoMessageEl = document.querySelector("#info-message");
   progressBarEl = document.querySelector("#download-progress-bar");
   progressTextEl = document.querySelector("#download-progress-text");
-  mainContainerEl = document.querySelector(".container");
-  webviewContainerEl = document.querySelector("#webview-container");
-  webviewIframeEl = document.querySelector("#webview-iframe");
-  backBtnEl = document.querySelector("#back-btn");
   
   // Add event listeners
   startBtnEl?.addEventListener("click", startNode);
@@ -409,7 +393,6 @@ window.addEventListener("DOMContentLoaded", () => {
   updateBtnEl?.addEventListener("click", checkForUpdates);
   logsBtnEl?.addEventListener("click", toggleLogs);
   openWebviewBtnEl?.addEventListener("click", openWebview);
-  backBtnEl?.addEventListener("click", closeWebview);
   closeLogsBtnEl?.addEventListener("click", toggleLogs);
   dbPathContainerEl?.addEventListener("click", selectCustomPath);
   logsOutputEl?.addEventListener("dblclick", clearLogs);
@@ -421,4 +404,3 @@ window.addEventListener("DOMContentLoaded", () => {
   // Periodic status check
   setInterval(updateProcessStatus, 5000);
 });
-

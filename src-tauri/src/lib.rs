@@ -577,7 +577,8 @@ pub fn run() {
             get_logs,
             clear_logs,
             get_current_data_path,
-            set_custom_data_path
+            set_custom_data_path,
+            open_webview
         ])
         .setup(|_app| {
             #[cfg(debug_assertions)] // only enable for debug builds
